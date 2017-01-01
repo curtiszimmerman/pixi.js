@@ -1,15 +1,15 @@
 {
     "name": "pixi.js",
-
-    "main": "bin/pixi.js",
-
+    "main": "dist/pixi.min.js",
     "ignore": [
         "**/.*",
+        "docs",
         "node_modules",
         "bower_components",
         "test",
-        "examples",
-        "tasks"
+        "scripts",
+        "bower.json",
+        "inch.json"
     ],
     "dependencies": {
     },

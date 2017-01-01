@@ -1,81 +1,171 @@
-var Resource = require('resource-loader').Resource,
-    path = require('path'),
-    core = require('../core');
+import { Resource } from 'resource-loader';
+import path from 'path';
+import * as core from '../core';
 
-module.exports = function ()
+const BATCH_SIZE = 1000;
+
+export default function ()
 {
-    return function (resource, next)
+    return function spritesheetParser(resource, next)
     {
-        // skip if no data, its not json, or it isn't spritesheet data
-        if (!resource.data || !resource.isJson || !resource.data.frames)
+        let resourcePath;
+        const imageResourceName = `${resource.name}_image`;
+
+        // skip if no data, its not json, it isn't spritesheet data, or the image resource already exists
+        if (!resource.data || !resource.isJson || !resource.data.frames || this.resources[imageResourceName])
         {
-            return next();
+            next();
+
+            return;
         }
 
-        var loadOptions = {
+        const loadOptions = {
             crossOrigin: resource.crossOrigin,
-            loadType: Resource.LOAD_TYPE.IMAGE
+            loadType: Resource.LOAD_TYPE.IMAGE,
+            metadata: resource.metadata.imageMetadata,
         };
 
-        var route = path.dirname(resource.url.replace(this.baseUrl, ''));
-
-        var resolution = core.utils.getResolutionOfUrl( resource.url );
+        // Prepend url path unless the resource image is a data url
+        if (resource.isDataUrl)
+        {
+            resourcePath = resource.data.meta.image;
+        }
+        else
+        {
+            resourcePath = `${path.dirname(resource.url.replace(this.baseUrl, ''))}/${resource.data.meta.image}`;
+        }
 
         // load the image for this sheet
-        this.add(resource.name + '_image', route + '/' + resource.data.meta.image, loadOptions, function (res)
+        this.add(imageResourceName, resourcePath, loadOptions, function onImageLoad(res)
         {
             resource.textures = {};
 
-            var frames = resource.data.frames;
+            const frames = resource.data.frames;
+            const frameKeys = Object.keys(frames);
+            const baseTexture = res.texture.baseTexture;
+            const scale = resource.data.meta.scale;
 
-            for (var i in frames)
+            // Use a defaultValue of `null` to check if a url-based resolution is set
+            let resolution = core.utils.getResolutionOfUrl(resource.url, null);
+
+            // No resolution found via URL
+            if (resolution === null)
             {
-                var rect = frames[i].frame;
+                // Use the scale value or default to 1
+                resolution = scale !== undefined ? scale : 1;
+            }
 
-                if (rect)
+            // For non-1 resolutions, update baseTexture
+            if (resolution !== 1)
+            {
+                baseTexture.resolution = resolution;
+                baseTexture.update();
+            }
+
+            let batchIndex = 0;
+
+            function processFrames(initialFrameIndex, maxFrames)
+            {
+                let frameIndex = initialFrameIndex;
+
+                while (frameIndex - initialFrameIndex < maxFrames && frameIndex < frameKeys.length)
                 {
-                    var size = null;
-                    var trim = null;
+                    const i = frameKeys[frameIndex];
+                    const rect = frames[i].frame;
 
-                    if (frames[i].rotated) {
-                        size = new core.Rectangle(rect.x, rect.y, rect.h, rect.w);
-                    }
-                    else {
-                        size = new core.Rectangle(rect.x, rect.y, rect.w, rect.h);
-                    }
-
-                    //  Check to see if the sprite is trimmed
-                    if (frames[i].trimmed)
+                    if (rect)
                     {
-                        trim = new core.Rectangle(
-                            frames[i].spriteSourceSize.x / resolution,
-                            frames[i].spriteSourceSize.y / resolution,
+                        let frame = null;
+                        let trim = null;
+                        const orig = new core.Rectangle(
+                            0,
+                            0,
                             frames[i].sourceSize.w / resolution,
                             frames[i].sourceSize.h / resolution
-                         );
+                        );
+
+                        if (frames[i].rotated)
+                        {
+                            frame = new core.Rectangle(
+                                rect.x / resolution,
+                                rect.y / resolution,
+                                rect.h / resolution,
+                                rect.w / resolution
+                            );
+                        }
+                        else
+                        {
+                            frame = new core.Rectangle(
+                                rect.x / resolution,
+                                rect.y / resolution,
+                                rect.w / resolution,
+                                rect.h / resolution
+                            );
+                        }
+
+                        //  Check to see if the sprite is trimmed
+                        if (frames[i].trimmed)
+                        {
+                            trim = new core.Rectangle(
+                                frames[i].spriteSourceSize.x / resolution,
+                                frames[i].spriteSourceSize.y / resolution,
+                                rect.w / resolution,
+                                rect.h / resolution
+                            );
+                        }
+
+                        resource.textures[i] = new core.Texture(
+                            baseTexture,
+                            frame,
+                            orig,
+                            trim,
+                            frames[i].rotated ? 2 : 0
+                        );
+
+                        // lets also add the frame to pixi's global cache for fromFrame and fromImage functions
+                        core.utils.TextureCache[i] = resource.textures[i];
                     }
 
-                    // flip the width and height!
-                    if (frames[i].rotated)
-                    {
-                        var temp = size.width;
-                        size.width = size.height;
-                        size.height = temp;
-                    }
-
-                    size.x /= resolution;
-                    size.y /= resolution;
-                    size.width /= resolution;
-                    size.height /= resolution;
-
-                    resource.textures[i] = new core.Texture(res.texture.baseTexture, size, size.clone(), trim, frames[i].rotated);
-
-                    // lets also add the frame to pixi's global cache for fromFrame and fromImage functions
-                    core.utils.TextureCache[i] = resource.textures[i];
+                    frameIndex++;
                 }
             }
 
-            next();
+            function shouldProcessNextBatch()
+            {
+                return batchIndex * BATCH_SIZE < frameKeys.length;
+            }
+
+            function processNextBatch(done)
+            {
+                processFrames(batchIndex * BATCH_SIZE, BATCH_SIZE);
+                batchIndex++;
+                setTimeout(done, 0);
+            }
+
+            function iteration()
+            {
+                processNextBatch(() =>
+                {
+                    if (shouldProcessNextBatch())
+                    {
+                        iteration();
+                    }
+                    else
+                    {
+                        next();
+                    }
+                });
+            }
+
+            if (frameKeys.length <= BATCH_SIZE)
+            {
+                processFrames(0, BATCH_SIZE);
+                next();
+            }
+            else
+            {
+                iteration();
+            }
         });
     };
-};
+}
